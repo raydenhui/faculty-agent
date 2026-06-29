@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "facultyai"
+version = "0.1.0"
+description = "AI-driven async CLI tool that autonomously scrapes university faculty information."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "FacultyAI" }]
+dependencies = [
+    "click>=8.1,<9.0",
+    "rich>=13.0",
+    "pydantic>=2.0,<3.0",
+    "PyYAML>=6.0,<7.0",
+    "aiosqlite>=0.19,<1.0",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "openpyxl>=3.1,<4.0",
+    "diskcache>=5.6",
+    "tenacity>=8.2",
+    "langchain>=0.2",
+    "langgraph>=0.2",
+    "langgraph-checkpoint-sqlite>=3.0",
+    "langchain-openai>=0.1",
+    "langchain-anthropic>=0.1",
+    "langchain-google-genai>=1.0",
+    "scrapegraphai>=1.0",
+    "playwright>=1.40,<2.0",
+    "prompt-toolkit>=3.0,<4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9.0",
+    "pytest-asyncio>=0.23,<0.24",
+    "pytest-playwright>=0.4,<0.5",
+    "pytest-cov>=4.1,<5.0",
+    "ruff>=0.3,<0.5",
+    "mypy>=1.8,<2.0",
+]
+
+[project.scripts]
+facultyai = "facultyai.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra -q --strict-markers"
+markers = [
+    "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
+    "e2e: marks tests as end-to-end tests",
+    "slow: marks tests as slow",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true

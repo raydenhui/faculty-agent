@@ -1,0 +1,45 @@
+version: 2
+
+llm:
+  provider: openai_compatible            # openai, azure, anthropic, google, deepseek, local
+  model: gpt-4-turbo-preview
+  temperature: 0.2
+  max_tokens: 4096
+  # For openai / openai_compatible (DeepSeek, local, etc.)
+  base_url: ""                          # e.g., https://api.deepseek.com/v1
+  api_key: ${OPENAI_API_KEY}            # use env var
+  # For Azure
+  azure_endpoint: ""
+  api_version: ""
+
+search:
+  provider: duckduckgo                    # or bing, serper
+  bing_api_key: ${BING_API_KEY}
+
+scraping:
+  headless: true
+  browser_timeout: 30
+  max_concurrent_jobs: 3
+  max_retries_per_step: 3
+  request_delay_sec: 1.0
+  use_scrapegraphai: true               # primary extraction engine
+
+files:
+  input_excel: "universities.xlsx"
+  output_excel: "faculty_data.xlsx"
+  schema_file: "schema.json"
+  database: "facultyai.db"
+  cache_dir: "./cache"
+
+output:
+  unique_keys: ["Email", "English Full Name"]   # used for identity matching
+  preserve_deprecated: true
+  archive_after_not_found_runs: 3
+
+department:
+  discovery_enabled: true                # allow university-only entries
+  find_similar_department: false
+  similar_search_confidence: 0.7
+
+chat:
+  allow_config_changes: true

@@ -1,0 +1,35 @@
+{
+  "columns": [
+    {
+      "name": "English Full Name",
+      "type": "extracted",
+      "hint": "The professor's full name in English, e.g. John Smith"
+    },
+    {
+      "name": "Last Name",
+      "type": "formula",
+      "formula": "=TEXTAFTER([@[English Full Name]],\" \")",
+      "comment": "Extract last name"
+    },
+    {
+      "name": "Email",
+      "type": "extracted",
+      "hint": "Email address, usually from the university domain"
+    },
+    {
+      "name": "Department",
+      "type": "extracted",
+      "hint": "The official department name"
+    },
+    {
+      "name": "Institution",
+      "type": "static",
+      "value_from": "university_name"
+    },
+    {
+      "name": "Profile URL",
+      "type": "extracted",
+      "hint": "Link to the person's profile page"
+    }
+  ]
+}

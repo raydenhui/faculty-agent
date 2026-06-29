@@ -4,3 +4,38 @@
 
 # LangGraph
 .langgraph_api/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Project data files
+facultyai.db
+faculty_data.xlsx
+universities.xlsx
+cache/
+
+/spec
