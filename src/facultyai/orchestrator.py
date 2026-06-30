@@ -169,22 +169,26 @@ async def run_pipeline(
                                 )
 
                             records = result.get("extracted_records", [])
+                            graph_error = result.get("error")
                             log.info(
                                 "job done  uni=%s dept=%s records=%d url=%s error=%s",
                                 job["university"],
                                 job.get("department"),
                                 len(records),
                                 result.get("listing_url", "?"),
-                                result.get("error") or "-",
+                                graph_error or "-",
                             )
 
-                            # Log graph-level errors
-                            graph_error = result.get("error")
                             if graph_error:
                                 progress.console.print(
                                     f"[yellow]Warning[/] {job['university']}/"
                                     f"{job.get('department', 'All')}: {graph_error}"
                                 )
+                                if not records:
+                                    await db.update_job_status(jid, "failed", graph_error)
+                                    failed += 1
+                                    progress.update(task, advance=1)
+                                    return
 
                             for rec in records:
                                 unique_vals: dict[str, Any] = {}

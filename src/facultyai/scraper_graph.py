@@ -195,15 +195,23 @@ async def _discover_url_impl(
     uni = state["university"]
     dept = state["department"] or ""
 
-    # Try multiple query formats until we get a good-looking faculty URL
     queries = [
         f"{uni} {dept} staff directory",
         f"{uni} {dept} people",
         f"{uni} department of {dept} faculty",
+        f"{uni} {dept} academic staff",
+        f"{uni} {dept} faculty listing",
+        f"{uni} {dept} professors",
     ] if dept else [
         f"{uni} staff directory",
         f"{uni} people",
+        f"{uni} faculty",
+        f"{uni} academic staff",
+        f"{uni} professors",
     ]
+
+    all_filtered: list[dict] = []
+    seen: set[str] = set()
 
     for qi, query in enumerate(queries):
         log.info("discover_url query[%d]=%s", qi, query)
@@ -212,46 +220,100 @@ async def _discover_url_impl(
             query,
             provider=config.search.provider,
             api_key=config.search.bing_api_key,
-            max_results=5,
+            max_results=8,
         )
+        log.debug("discover_url[%d] raw_search_results=%d", qi, len(search_results))
+        for si, sr in enumerate(search_results):
+            log.debug("  [%d] %s | %s", si, sr.get("href", ""), sr.get("title", "")[:80])
         if not search_results:
+            log.info("discover_url[%d] no search results", qi)
             continue
 
-        results_text = "\n".join(
-            f"  [{i}] {r['title']}\n      URL: {r['href']}"
-            for i, r in enumerate(search_results)
+        filtered = _filter_bad_urls(search_results)
+        log.debug(
+            "discover_url[%d] after_filter=%d (removed %d)",
+            qi, len(filtered), len(search_results) - len(filtered),
         )
-
-        prompt = (
-            f"Find the official page listing faculty members (names + positions) for: {uni}"
-            + (f", Department of {dept}" if dept else "")
-            + f".\n\nSearch results:\n{results_text}\n\n"
-            "Pick the best URL. Rules:\n"
-            "- Must be on the university's official domain.\n"
-            "- Look for paths like /people, /staff, /faculty, /academic-staff.\n"
-            "- Skip homepages (just a domain with /), LinkedIn, Facebook, Wikipedia, admission pages.\n"
-            "- Prefer departmental subdomains (e.g. cs.university.edu) over the main university domain.\n"
-            "- If none are clearly a faculty listing, respond with NONE.\n\n"
-            "Respond with the URL or NONE."
-        )
-
-        try:
-            response = await llm.ainvoke(prompt)
-            text = _llm_response_text(response).strip()
-            log.info("discover_url[%d]=%s", qi, text[:120])
-        except Exception:
+        if not filtered:
+            log.info("discover_url[%d] all results filtered out", qi)
             continue
 
-        url_match = re.search(r"https?://[^\s]+", text)
-        if url_match:
-            state["listing_url"] = url_match.group().rstrip(".)")
+        url = await _ask_llm_for_url(llm, uni, dept, filtered, qi)
+        if url:
+            state["listing_url"] = url
             return state
-        if "NONE" in text.upper():
-            log.info("discover_url[%d] LLM said NONE, trying next query", qi)
 
-    # Last resort: first result from first query
-    state["listing_url"] = search_results[0].get("href") if search_results else None
+        for r in filtered:
+            href = r.get("href", "")
+            if href and href not in seen:
+                seen.add(href)
+                all_filtered.append(r)
+
+    # Final combined attempt: ask LLM across ALL unique results from ALL queries
+    if all_filtered:
+        log.debug("discover_url combined attempt with %d unique results", len(all_filtered))
+        url = await _ask_llm_for_url(llm, uni, dept, all_filtered, "combined")
+        if url:
+            state["listing_url"] = url
+            return state
+
+    state["listing_url"] = None
+    state["error"] = f"No faculty listing URL found for {uni} / {dept} after {len(queries)} search queries."
+    log.warning(state["error"])
     return state
+
+
+async def _ask_llm_for_url(
+    llm: BaseChatModel,
+    uni: str,
+    dept: str,
+    results: list[dict],
+    qi: object,
+) -> str | None:
+    results_text = "\n".join(
+        f"  [{i}] {r['title']}\n      URL: {r['href']}"
+        for i, r in enumerate(results)
+    )
+
+    target = f"{uni}" + (f", Department of {dept}" if dept else "")
+    log.debug("discover_url[%s] target=%s candidates=%d", qi, target, len(results))
+
+    prompt = (
+        f"Find the official page listing faculty members (names + positions) for: {target}.\n\n"
+        f"Search results:\n{results_text}\n\n"
+        "Pick the BEST URL from these results. Rules:\n"
+        "- Must be on the university's official domain.\n"
+        "- Look for paths like /people, /staff, /faculty, /academic-staff.\n"
+        "- Skip homepages (just a domain with /), LinkedIn, Facebook, Wikipedia, admission pages.\n"
+        "- Prefer departmental subdomains (e.g. cs.university.edu) over the main university domain.\n"
+        "- If none are clearly a faculty listing, respond with NONE.\n\n"
+        "Respond with the URL or NONE."
+    )
+
+    try:
+        log.debug("discover_url[%s] prompt:\n%s", qi, prompt)
+        response = await llm.ainvoke(prompt)
+        text = _llm_response_text(response).strip()
+        log.info("discover_url[%s] RESPONSE:\n%s", qi, text)
+    except Exception as e:
+        log.warning("discover_url[%s] LLM call failed: %s", qi, e)
+        return None
+
+    url_match = re.search(r"https?://[^\s]+", text)
+    if url_match:
+        picked = url_match.group().rstrip(".)")
+        log.debug("discover_url[%s] picked=%s", qi, picked)
+        return picked
+
+    log.info("discover_url[%s] LLM said NONE or no URL in response", qi)
+    return None
+
+
+def _filter_bad_urls(results: list[dict]) -> list[dict]:
+    blocked = {"linkedin.com", "facebook.com", "wikipedia.org", "youtube.com",
+               "twitter.com", "x.com", "instagram.com", "reddit.com", "glassdoor.com",
+               "indeed.com", "topuniversities.com", "usnews.com", "timeshighereducation.com"}
+    return [r for r in results if not any(b in r.get("href", "") for b in blocked)]
 
 
 def _fetch_page_node(
@@ -264,7 +326,8 @@ def _fetch_page_node(
         url = state.get("listing_url")
         if not url:
             log.warning("fetch_page: no URL")
-            state["error"] = "No URL to fetch."
+            if not state.get("error"):
+                state["error"] = "No URL to fetch."
             return state
 
         cached = cache.get_url_content(url)
@@ -358,7 +421,8 @@ async def _run_scrapegraph_impl(
     url = state.get("listing_url")
     if not url:
         log.warning("run_scrapegraph: no listing_url, skipping")
-        state["error"] = "No listing URL available for scraping."
+        if not state.get("error"):
+            state["error"] = "No listing URL available for scraping."
         return state
 
     prompt_text = build_extraction_prompt(schema)
