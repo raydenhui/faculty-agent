@@ -7,7 +7,7 @@ import hashlib
 import json
 from typing import Any
 
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
@@ -17,10 +17,11 @@ from .database import Database, _job_id
 from .exporter import export_to_excel
 from .input_manager import sync_input_excel
 from .llm_factory import get_llm
+from .logging_config import get_logger
 from .schema import Schema
 from .scraper_graph import build_agent_graph
 
-console = Console()
+log = get_logger("orch")
 
 
 async def run_pipeline(
@@ -32,6 +33,8 @@ async def run_pipeline(
 ) -> dict[str, Any]:
     """Run all pending jobs and export results. Returns run summary dict."""
     llm = get_llm(config.llm)
+    console = Console()
+    log.info("pipeline start  provider=%s model=%s", config.llm.provider, config.llm.model)
 
     console.print("[bold blue]Orchestrator[/] Loading input from Excel...")
     inserted, deleted = await sync_input_excel(db, config.files.input_excel)
@@ -51,7 +54,7 @@ async def run_pipeline(
     discovery_jobs = 0
     scrape_jobs = 0
 
-    with SqliteSaver.from_conn_string(str(db.db_path)) as checkpointer:
+    async with AsyncSqliteSaver.from_conn_string(str(db.db_path)) as checkpointer:
         agent = build_agent_graph(config, schema, llm, cache, checkpointer=checkpointer)
 
         for r in uni_rows:
@@ -62,7 +65,7 @@ async def run_pipeline(
 
             if jid in existing_job_ids:
                 existing = existing_job_map[jid]
-                if retry_failed and existing["status"] in ("failed", "running"):
+                if retry_failed and existing["status"] in ("failed", "running", "completed"):
                     await db.update_job_status(jid, "pending")
                     if existing["job_type"] == "discovery":
                         discovery_jobs += 1
@@ -156,7 +159,33 @@ async def run_pipeline(
                                 {"configurable": {"thread_id": jid}},
                             )
 
+                            listing_url = result.get("listing_url")
+                            if listing_url:
+                                await db.upsert_job(
+                                    job["university"],
+                                    job.get("department"),
+                                    listing_url=listing_url,
+                                    status="running",
+                                )
+
                             records = result.get("extracted_records", [])
+                            log.info(
+                                "job done  uni=%s dept=%s records=%d url=%s error=%s",
+                                job["university"],
+                                job.get("department"),
+                                len(records),
+                                result.get("listing_url", "?"),
+                                result.get("error") or "-",
+                            )
+
+                            # Log graph-level errors
+                            graph_error = result.get("error")
+                            if graph_error:
+                                progress.console.print(
+                                    f"[yellow]Warning[/] {job['university']}/"
+                                    f"{job.get('department', 'All')}: {graph_error}"
+                                )
+
                             for rec in records:
                                 unique_vals: dict[str, Any] = {}
                                 for key in config.output.unique_keys:

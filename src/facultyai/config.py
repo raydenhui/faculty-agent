@@ -47,6 +47,8 @@ class ScrapingConfig(BaseModel):
     max_retries_per_step: int = 3
     request_delay_sec: float = 1.0
     use_scrapegraphai: bool = True
+    deep_extraction: bool = False
+    max_detail_pages: int = 10
 
 
 class FilesConfig(BaseModel):

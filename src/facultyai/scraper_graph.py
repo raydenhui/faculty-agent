@@ -25,7 +25,12 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from .cache import CacheManager
 from .config import AppConfig
 from .llm_factory import web_search
+from .logging_config import get_logger
 from .schema import Schema, build_extraction_prompt
+
+log = get_logger("graph")
+
+_depth_sem = asyncio.Semaphore(1)  # DepthSearchGraph is resource-heavy (Playwright + qdrant + embeddings)
 
 # ---------------------------------------------------------------------------
 # State
@@ -126,7 +131,7 @@ async def _discover_departments_impl(
 ) -> AgentState:
     uni = state["university"]
     try:
-        query = f"{uni} academic departments list site:.edu"
+        query = f"{uni} departments"
 
         max_attempts = config.scraping.max_retries_per_step
         search_results: list[dict[str, str]] = []
@@ -190,76 +195,62 @@ async def _discover_url_impl(
     uni = state["university"]
     dept = state["department"] or ""
 
-    if dept:
-        query = f"{uni} {dept} faculty directory staff listing page"
-    else:
-        query = f"{uni} faculty directory staff listing page"
+    # Try multiple query formats until we get a good-looking faculty URL
+    queries = [
+        f"{uni} {dept} staff directory",
+        f"{uni} {dept} people",
+        f"{uni} department of {dept} faculty",
+    ] if dept else [
+        f"{uni} staff directory",
+        f"{uni} people",
+    ]
 
-    try:
-        max_attempts = config.scraping.max_retries_per_step
-        search_results: list[dict[str, str]] = []
-        for attempt in range(max_attempts):
-            search_results = await web_search(
-                query,
-                provider=config.search.provider,
-                api_key=config.search.bing_api_key,
-                max_results=5,
-            )
-            if search_results:
-                break
-            await asyncio.sleep(config.scraping.request_delay_sec * (attempt + 1))
+    for qi, query in enumerate(queries):
+        log.info("discover_url query[%d]=%s", qi, query)
 
-        urls_text = "\n".join(
-            f"{i}: {r['title']} - {r['href']}"
+        search_results = await web_search(
+            query,
+            provider=config.search.provider,
+            api_key=config.search.bing_api_key,
+            max_results=5,
+        )
+        if not search_results:
+            continue
+
+        results_text = "\n".join(
+            f"  [{i}] {r['title']}\n      URL: {r['href']}"
             for i, r in enumerate(search_results)
-            if r.get("href")
         )
 
-        if not urls_text:
-            state["error"] = "No search results found for faculty listing URL."
-            return state
+        prompt = (
+            f"Find the official page listing faculty members (names + positions) for: {uni}"
+            + (f", Department of {dept}" if dept else "")
+            + f".\n\nSearch results:\n{results_text}\n\n"
+            "Pick the best URL. Rules:\n"
+            "- Must be on the university's official domain.\n"
+            "- Look for paths like /people, /staff, /faculty, /academic-staff.\n"
+            "- Skip homepages (just a domain with /), LinkedIn, Facebook, Wikipedia, admission pages.\n"
+            "- Prefer departmental subdomains (e.g. cs.university.edu) over the main university domain.\n"
+            "- If none are clearly a faculty listing, respond with NONE.\n\n"
+            "Respond with the URL or NONE."
+        )
 
-        prompt = f"""Find the most likely faculty/directory listing page URL for:
-University: {uni}
-Department: {dept or "All"}
-
-Search results:
-{urls_text}
-
-Respond with ONLY the single most relevant URL and nothing else."""
-
-        response = await llm.ainvoke(prompt)
-        text = _llm_response_text(response).strip()
+        try:
+            response = await llm.ainvoke(prompt)
+            text = _llm_response_text(response).strip()
+            log.info("discover_url[%d]=%s", qi, text[:120])
+        except Exception:
+            continue
 
         url_match = re.search(r"https?://[^\s]+", text)
         if url_match:
             state["listing_url"] = url_match.group().rstrip(".)")
-        else:
-            state["listing_url"] = search_results[0]["href"] if search_results else None
+            return state
+        if "NONE" in text.upper():
+            log.info("discover_url[%d] LLM said NONE, trying next query", qi)
 
-        # Similar department fallback
-        if not state.get("listing_url") and config.department.find_similar_department:
-            similar_query = f"{uni} faculty directory listing page"
-            similar_results = await web_search(
-                similar_query,
-                provider=config.search.provider,
-                api_key=config.search.bing_api_key,
-                max_results=3,
-            )
-            if similar_results:
-                prompt = f"""Find the best faculty listing page for {uni} from:
-{json.dumps([r["href"] for r in similar_results])}
-
-Return ONLY the URL."""
-                response2 = await llm.ainvoke(prompt)
-                text2 = _llm_response_text(response2).strip()
-                url_match2 = re.search(r"https?://[^\s]+", text2)
-                if url_match2:
-                    state["listing_url"] = url_match2.group().rstrip(".)")
-
-    except Exception as e:
-        state["error"] = str(e)
-
+    # Last resort: first result from first query
+    state["listing_url"] = search_results[0].get("href") if search_results else None
     return state
 
 
@@ -272,30 +263,33 @@ def _fetch_page_node(
     async def _node(state: AgentState) -> AgentState:
         url = state.get("listing_url")
         if not url:
+            log.warning("fetch_page: no URL")
             state["error"] = "No URL to fetch."
             return state
 
-        # 1. Check cache
         cached = cache.get_url_content(url)
         if cached:
+            log.debug("fetch_page cache HIT url=%s len=%d", url, len(cached))
             state["page_html"] = cached
             return state
 
-        # 2. Try basic HTTP fetch
+        log.info("fetch_page start url=%s", url)
         html = await _http_fetch(url, config)
         if html and _has_content(html):
+            log.debug("fetch_page http OK len=%d", len(html))
             cache.set_url_content(url, html)
             state["page_html"] = html
             return state
 
-        # 3. Playwright fallback
-        if html is None or not _has_content(html):
-            html = await _playwright_fetch(url, config)
-            if html:
-                cache.set_url_content(url, html)
-                state["page_html"] = html
-                return state
+        log.info("fetch_page trying Playwright fallback...")
+        html = await _playwright_fetch(url, config)
+        if html:
+            log.debug("fetch_page playwright OK len=%d", len(html))
+            cache.set_url_content(url, html)
+            state["page_html"] = html
+            return state
 
+        log.warning("fetch_page FAILED url=%s", url)
         state["page_html"] = None
         return state
 
@@ -363,59 +357,111 @@ async def _run_scrapegraph_impl(
 ) -> AgentState:
     url = state.get("listing_url")
     if not url:
+        log.warning("run_scrapegraph: no listing_url, skipping")
         state["error"] = "No listing URL available for scraping."
         return state
 
     prompt_text = build_extraction_prompt(schema)
 
-    # Check extraction cache
     input_hash = _cache_input_hash(url, prompt_text)
     cached_records = cache.get_extraction(input_hash)
     if cached_records is not None:
+        log.info("run_scrapegraph cache HIT url=%s records=%d", url, len(cached_records))
         state["extracted_records"] = cached_records
         return state
 
-    # Use pre-fetched HTML if available, otherwise let ScrapeGraphAI fetch
     source = state.get("page_html") or url
+    log.info("run_scrapegraph start url=%s source_type=%s", url, "html" if state.get("page_html") else "url")
 
     try:
-        from scrapegraphai.graphs import SmartScraperGraph
+        llm_config: dict[str, Any] = {
+            "model": f"{config.llm.provider}/{config.llm.model}",
+            "temperature": config.llm.temperature,
+        }
+        if config.llm.api_key:
+            llm_config["api_key"] = config.llm.api_key
+        if config.llm.base_url:
+            llm_config["base_url"] = config.llm.base_url
 
-        scraper = SmartScraperGraph(
-            prompt=prompt_text,
-            source=source,
-            config={
-                "llm": {
-                    "model": config.llm.model,
-                    "temperature": config.llm.temperature,
-                },
-            },
-        )
+        if config.scraping.deep_extraction:
+            records = await _scrape_depth(url, prompt_text, llm_config, config)
+        else:
+            records = await _scrape_single_page(source, prompt_text, llm_config)
 
-        loop = asyncio.get_event_loop()
-
-        def _run() -> dict:
-            return scraper.run()
-
-        result = await loop.run_in_executor(None, _run)
-
-        records = _extract_records_result(result)
-
+        log.info("run_scrapegraph done  records=%d", len(records))
         if records:
+            log.debug("sample keys: %s", list(records[0].keys()) if records else "[]")
             cache.set_extraction(input_hash, records)
 
         state["extracted_records"] = records
 
     except Exception as e:
+        log.error("run_scrapegraph FAILED  %s: %s", type(e).__name__, e)
         state["error"] = f"ScrapeGraphAI error: {e}"
         state["extracted_records"] = []
 
     return state
 
 
+async def _scrape_depth(
+    url: str,
+    prompt_text: str,
+    llm_config: dict[str, Any],
+    config: AppConfig,
+) -> list[dict[str, Any]]:
+    """Use DepthSearchGraph (depth=1) for pure AI extraction from listing + detail pages."""
+    from scrapegraphai.graphs import DepthSearchGraph
+
+    log.info("depth_search start url=%s depth=1", url)
+
+    crawl_config = {
+        "llm": llm_config,
+        "depth": 1,
+        "only_inside_links": True,
+        "cut": True,
+        "verbose": False,
+    }
+
+    graph = DepthSearchGraph(
+        prompt=prompt_text,
+        source=url,
+        config=crawl_config,
+    )
+    loop = asyncio.get_event_loop()
+
+    def _run() -> dict:
+        return graph.run()
+
+    result = await loop.run_in_executor(None, _run)
+    records = _extract_records_result(result)
+    log.info("depth_search done records=%d", len(records))
+    return records
+
+
+async def _scrape_single_page(
+    source: str,
+    prompt_text: str,
+    llm_config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    from scrapegraphai.graphs import SmartScraperGraph
+
+    scraper = SmartScraperGraph(
+        prompt=prompt_text,
+        source=source,
+        config={"llm": llm_config},
+    )
+    loop = asyncio.get_event_loop()
+
+    def _run() -> dict:
+        return scraper.run()
+
+    result = await loop.run_in_executor(None, _run)
+    return _extract_records_result(result)
+
+
 def _extract_records_result(result: Any) -> list[dict[str, Any]]:
     if isinstance(result, dict):
-        extracted = result.get("output", result.get("data", result))
+        extracted = result.get("content", result.get("output", result.get("data", result)))
         if isinstance(extracted, list):
             return extracted
         if isinstance(extracted, dict):

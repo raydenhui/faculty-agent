@@ -1,6 +1,11 @@
 {
   "columns": [
     {
+      "name": "Title",
+      "type": "extracted",
+      "hint": "The professor's title, e.g. Dr., Prof., etc."
+    },
+    {
       "name": "English Full Name",
       "type": "extracted",
       "hint": "The professor's full name in English, e.g. John Smith"

@@ -23,6 +23,8 @@ scraping:
   max_retries_per_step: 3
   request_delay_sec: 1.0
   use_scrapegraphai: true               # primary extraction engine
+  deep_extraction: true                 # follow profile links for detail info
+  max_detail_pages: 5                   # limit detail pages per job
 
 files:
   input_excel: "universities.xlsx"

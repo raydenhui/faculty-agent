@@ -15,13 +15,17 @@ from .cache import CacheManager
 from .config import load_config, mask_secrets
 from .database import Database
 from .lock_manager import LockManager
+from .logging_config import configure as configure_logging
 from .schema import load_schema
 
 console = Console()
 
 
 def _run_async(coro):
-    return asyncio.run(coro)
+    try:
+        return asyncio.run(coro)
+    except KeyboardInterrupt:
+        pass
 
 
 @click.group()
@@ -33,16 +37,22 @@ def cli() -> None:
 @cli.command()
 @click.option("--config-path", default="config.yaml", help="Path to config file.")
 @click.option("--retry-failed", is_flag=True, default=False, help="Retry previously failed jobs.")
-def run(config_path: str, retry_failed: bool) -> None:
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Show info-level logs.")
+@click.option("--debug", is_flag=True, default=False, help="Show debug-level logs (implies -v).")
+def run(config_path: str, retry_failed: bool, verbose: bool, debug: bool) -> None:
     """Start/run all pending jobs."""
+    configure_logging(verbose=verbose, debug=debug)
     _run_with_lock(config_path, retry_failed=retry_failed)
 
 
 @cli.command()
 @click.option("--config-path", default="config.yaml", help="Path to config file.")
 @click.option("--retry-failed", is_flag=True, default=False, help="Also retry previously failed jobs.")
-def resume(config_path: str, retry_failed: bool) -> None:
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Show info-level logs.")
+@click.option("--debug", is_flag=True, default=False, help="Show debug-level logs (implies -v).")
+def resume(config_path: str, retry_failed: bool, verbose: bool, debug: bool) -> None:
     """Resume incomplete jobs (resets running jobs, optionally retries failed)."""
+    configure_logging(verbose=verbose, debug=debug)
     cfg = load_config(config_path)
     lock = LockManager()
 
@@ -83,10 +93,13 @@ def resume(config_path: str, retry_failed: bool) -> None:
 
 @cli.command()
 @click.option("--config-path", default="config.yaml", help="Path to config file.")
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Show info-level logs.")
+@click.option("--debug", is_flag=True, default=False, help="Show debug-level logs (implies -v).")
 @click.argument("university")
 @click.argument("department", required=False)
-def retry(config_path: str, university: str, department: str | None) -> None:
+def retry(config_path: str, university: str, department: str | None, verbose: bool, debug: bool) -> None:
     """Retry a specific failed job by university (and optional department)."""
+    configure_logging(verbose=verbose, debug=debug)
     cfg = load_config(config_path)
     lock = LockManager()
 

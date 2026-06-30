@@ -20,17 +20,17 @@ def _file_hash(path: Path) -> str:
 async def sync_input_excel(
     db: Database,
     excel_path: str | Path,
-    sheet_name: str = "universities",
+    sheet_name: str | int = 0,
 ) -> tuple[int, int]:
     """Import rows from *excel_path* into ``input_universities``.
 
+    *sheet_name* defaults to ``0`` (first sheet).
     Returns ``(inserted_or_updated, deleted)``.
     """
     path = Path(excel_path)
     if not path.exists():
         return 0, 0
 
-    # Read Excel
     df = pd.read_excel(path, sheet_name=sheet_name)
     df = df.where(pd.notna(df), None)  # type: ignore[assignment]
 
